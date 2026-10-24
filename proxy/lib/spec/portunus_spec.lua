@@ -28,6 +28,9 @@ describe("proxy_utils.portunus", function()
 			store[name:lower()] = value
 		end
 		local headers = { store = store }
+		headers.get = function(_, name)
+			return store[name:lower()]
+		end
 		headers.remove = spy.new(function(_, name)
 			store[name:lower()] = nil
 		end)
@@ -176,7 +179,6 @@ describe("proxy_utils.portunus", function()
 				["x-api-key"] = true,
 				["x-custom-auth"] = true,
 			}, client.credential_headers)
-			assert.equals("x-custom-auth", client.request_api_key_header)
 		end)
 
 		it("should fall back to only api_key_header when the known list is empty", function()
@@ -370,6 +372,138 @@ describe("proxy_utils.portunus", function()
 			}, "x-api-key")
 
 			assert.same({ accept = "*/*" }, result)
+		end)
+	end)
+
+	describe("several accepted inbound headers", function()
+		local function multi_header_client(api_key_header, api_key_prefix)
+			return portunus_module.new({
+				api_key_header = api_key_header or "x-api-key, Authorization",
+				api_key_prefix = api_key_prefix or ",Bearer ",
+				known_auth_headers = "",
+			})
+		end
+
+		local function extract(client, request_headers)
+			return client:extract_auth_payload(handle_for(fake_headers(request_headers)))
+		end
+
+		it("accepts the payload in x-api-key with an empty prefix", function()
+			local payload, err = extract(multi_header_client(), { ["x-api-key"] = "payload-1" })
+
+			assert.is_nil(err)
+			assert.equals("payload-1", payload)
+		end)
+
+		it("accepts the payload in Authorization with the Bearer prefix", function()
+			local payload, err = extract(multi_header_client(), { Authorization = "Bearer payload-2" })
+
+			assert.is_nil(err)
+			assert.equals("payload-2", payload)
+		end)
+
+		it("takes the earliest listed header when both are present", function()
+			local both = { ["x-api-key"] = "from-x-api-key", authorization = "Bearer from-authorization" }
+
+			assert.equals("from-x-api-key", extract(multi_header_client(), both))
+			assert.equals(
+				"from-authorization",
+				extract(multi_header_client("authorization,x-api-key", "Bearer ,"), both)
+			)
+		end)
+
+		it("skips a listed header whose value lacks its prefix", function()
+			local payload, err = extract(
+				multi_header_client("authorization,x-api-key", "Bearer ,"),
+				{ authorization = "Basic abc", ["x-api-key"] = "payload-3" }
+			)
+
+			assert.is_nil(err)
+			assert.equals("payload-3", payload)
+		end)
+
+		it("rejects a request whose only listed header lacks its prefix", function()
+			local payload, err = extract(multi_header_client(), { authorization = "Basic abc" })
+
+			assert.is_nil(payload)
+			assert.equals("Invalid authorization format", err)
+		end)
+
+		it("rejects a request carrying none of the listed headers", function()
+			local payload, err = extract(multi_header_client(), { accept = "*/*" })
+
+			assert.is_nil(payload)
+			assert.equals("Authorization header is required", err)
+		end)
+
+		it("injects into the first listed header and removes a Bearer payload", function()
+			local headers = fake_headers({ authorization = "Bearer payload", accept = "*/*" })
+
+			local result = multi_header_client():apply_upstream_auth(handle_for(headers), { api_key = "sk-1", request_id = "r" })
+
+			assert.equals("x-api-key", result)
+			assert.same({ ["x-api-key"] = "sk-1", accept = "*/*" }, headers.store)
+		end)
+
+		it("removes every listed header that is not the upstream header", function()
+			local headers = fake_headers({
+				["x-api-key"] = "payload",
+				authorization = "Bearer other-payload",
+				accept = "*/*",
+			})
+
+			multi_header_client():apply_upstream_auth(handle_for(headers), { api_key = "sk-1", request_id = "r" })
+
+			assert.same({ ["x-api-key"] = "sk-1", accept = "*/*" }, headers.store)
+		end)
+
+		it("removes x-api-key when the credential goes to output_header authorization", function()
+			local headers = fake_headers({ ["x-api-key"] = "payload", accept = "*/*" })
+
+			local result = multi_header_client():apply_upstream_auth(handle_for(headers), {
+				api_key = "token-1",
+				request_id = "r",
+				output_header = "authorization",
+				output_prefix = "Bearer ",
+			})
+
+			assert.equals("authorization", result)
+			assert.same({ authorization = "Bearer token-1", accept = "*/*" }, headers.store)
+		end)
+
+		it("keeps every listed header out of the logged headers", function()
+			local result = multi_header_client():strip_credential_headers({
+				["X-Api-Key"] = "sk-1",
+				Authorization = "Bearer payload",
+				accept = "*/*",
+			}, "x-api-key")
+
+			assert.same({ accept = "*/*" }, result)
+		end)
+
+		it("refuses to start when header and prefix counts differ", function()
+			assert.has_error(function()
+				multi_header_client("x-api-key,authorization", "Bearer ")
+			end, "API_KEY_HEADER has 2 entries but API_KEY_PREFIX has 1")
+		end)
+
+		it("refuses to start when a listed prefix starts with whitespace", function()
+			assert.has_error(function()
+				multi_header_client("x-api-key,authorization", ", Bearer ")
+			end, "API_KEY_PREFIX entry 2 starts with whitespace")
+		end)
+
+		it("still starts with a single header that can never match", function()
+			assert.has_no_error(function()
+				multi_header_client("", "Bearer ")
+				multi_header_client("authorization", " Bearer ")
+			end)
+		end)
+
+		it("refuses to start when a listed header name is empty", function()
+			assert.has_error(function()
+				multi_header_client("x-api-key,,authorization", ",,Bearer ")
+			end, "API_KEY_HEADER contains an empty header name")
 		end)
 	end)
 

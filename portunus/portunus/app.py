@@ -75,9 +75,9 @@ class AuthorizationResponse(BaseModel):
         api_key: The API key to use for upstream requests
         request_id: Unique request ID for correlation
         output_header: Upstream header that should carry the credential. When
-            None the proxy uses its configured API_KEY_HEADER.
+            None the proxy uses its first configured API_KEY_HEADER.
         output_prefix: Prefix for the credential value. When None the proxy uses
-            its configured API_KEY_PREFIX; an empty string means no prefix.
+            its first configured API_KEY_PREFIX; an empty string means no prefix.
     """
 
     api_key: str

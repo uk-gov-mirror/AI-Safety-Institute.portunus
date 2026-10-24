@@ -7,6 +7,42 @@ local portunus = {}
 local portunus_client = {}
 portunus_client.__index = portunus_client
 
+--- Splits a comma-separated string, keeping empty and untrimmed items
+local function split_list(list)
+	local items = {}
+	for item in (list .. ","):gmatch("([^,]*),") do
+		items[#items + 1] = item
+	end
+	return items
+end
+
+--- Pairs the comma-separated header names with the comma-separated prefixes, in order
+-- Prefixes are kept verbatim because they usually end in a space ("Bearer ").
+-- @param header_list Comma-separated header names, e.g. "x-api-key,authorization"
+-- @param prefix_list Comma-separated prefixes, one per header, e.g. ",Bearer "
+-- @return accepted List of { header = lowercased name, prefix = prefix }
+local function parse_accepted_auth(header_list, prefix_list)
+	local headers = split_list(header_list or "")
+	local prefixes = split_list(prefix_list or "")
+	if #headers ~= #prefixes then
+		error("API_KEY_HEADER has " .. #headers .. " entries but API_KEY_PREFIX has " .. #prefixes, 0)
+	end
+	local accepted = {}
+	for i, name in ipairs(headers) do
+		local header = name:match("^%s*(.-)%s*$"):lower()
+		if #headers > 1 and header == "" then
+			error("API_KEY_HEADER contains an empty header name", 0)
+		end
+		-- Envoy strips leading whitespace from header values, so such a prefix never matches.
+		-- Only lists are validated; a lone header/prefix pair is accepted as given.
+		if #headers > 1 and prefixes[i]:find("^%s") then
+			error("API_KEY_PREFIX entry " .. i .. " starts with whitespace", 0)
+		end
+		accepted[i] = { header = header, prefix = prefixes[i] }
+	end
+	return accepted
+end
+
 --- Creates a new Portunus client instance
 -- @param config Configuration table
 -- @return A new Portunus client instance
@@ -17,14 +53,15 @@ function portunus.new(config)
 		api_key = config.portunus_api_key,
 		api_key_header = config.portunus_api_key_header,
 		-- Request auth config
-		request_api_key_header = (config.api_key_header or ""):lower(),
-		request_api_key_prefix = config.api_key_prefix,
+		accepted_auth = parse_accepted_auth(config.api_key_header, config.api_key_prefix),
 		credential_headers = utils.parse_header_set(config.known_auth_headers),
 		target_host = config.target_host,
 		-- Header prefix for proxy-specific response headers
 		header_prefix = config.header_prefix,
 	}
-	instance.credential_headers[instance.request_api_key_header] = true
+	for _, accepted in ipairs(instance.accepted_auth) do
+		instance.credential_headers[accepted.header] = true
+	end
 	setmetatable(instance, portunus_client)
 	return instance
 end
@@ -61,18 +98,23 @@ end
 -- @param request_handle The Envoy request handle
 -- @return payload, error The extracted payload or nil and an error message
 function portunus_client:extract_auth_payload(request_handle)
-	local auth_header = request_handle:headers():get(self.request_api_key_header)
+	local headers = request_handle:headers()
+	local found = false
 
-	if not auth_header then
-		return nil, "Authorization header is required"
+	for _, accepted in ipairs(self.accepted_auth) do
+		local auth_header = headers:get(accepted.header)
+		if auth_header then
+			found = true
+			if auth_header:find("^" .. accepted.prefix) then
+				return auth_header:sub(#accepted.prefix + 1), nil
+			end
+		end
 	end
 
-	if not auth_header:find("^" .. self.request_api_key_prefix) then
+	if found then
 		return nil, "Invalid authorization format"
 	end
-
-	-- Remove the prefix (e.g., "Bearer ")
-	return auth_header:sub(#self.request_api_key_prefix + 1), nil
+	return nil, "Authorization header is required"
 end
 
 --- Makes a synchronous call to Portunus /authorise endpoint
@@ -246,7 +288,7 @@ function portunus_client:parse_authorization_response(body)
 end
 
 --- Resolves the upstream header that carries the credential and its full value
--- Falls back to the configured api_key_header/api_key_prefix when the response
+-- Falls back to the first configured api_key_header/api_key_prefix pair when the response
 -- does not set output_header/output_prefix. An empty output_prefix means no
 -- prefix; only a missing one falls back. An empty output_header is treated as absent.
 -- @param auth_response Parsed AuthorizationResponse
@@ -254,26 +296,28 @@ end
 function portunus_client:resolve_upstream_auth(auth_response)
 	local header = auth_response.output_header
 	if header == nil or header == "" then
-		header = self.request_api_key_header
+		header = self.accepted_auth[1].header
 	end
 	local prefix = auth_response.output_prefix
 	if prefix == nil then
-		prefix = self.request_api_key_prefix
+		prefix = self.accepted_auth[1].prefix
 	end
 	return header:lower(), prefix .. auth_response.api_key
 end
 
---- Sets the upstream auth header and removes the header the payload arrived in
--- Every other header is forwarded untouched; when the two names match this is
--- a plain overwrite.
+--- Sets the upstream auth header and removes every accepted inbound header
+-- Every other header is forwarded untouched; an accepted header that is the
+-- upstream header is overwritten.
 -- @param request_handle The Envoy request handle
 -- @param auth_response Parsed AuthorizationResponse
 -- @return header Lowercased name of the header that now carries the credential
 function portunus_client:apply_upstream_auth(request_handle, auth_response)
 	local header, value = self:resolve_upstream_auth(auth_response)
 	local headers = request_handle:headers()
-	if header ~= self.request_api_key_header then
-		headers:remove(self.request_api_key_header)
+	for _, accepted in ipairs(self.accepted_auth) do
+		if accepted.header ~= header then
+			headers:remove(accepted.header)
+		end
 	end
 	headers:replace(header, value)
 	return header

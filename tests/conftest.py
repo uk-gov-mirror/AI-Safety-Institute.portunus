@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from base64 import b64decode, b64encode
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +46,23 @@ DEFAULT_LOCAL_API_KEY = "xyz"
 # Set custom header prefix to test configurability (doubles as backwards-compat check)
 COMPOSE_FILE["services"]["proxy"]["environment"]["PORTUNUS_HEADER_PREFIX"] = (
     "aisi-proxy"
+)
+
+# A second proxy accepting the payload from either header. Its known list omits
+# both, so logging exclusion must come from the accepted-header config alone.
+MULTI_HEADER_PROXY_PORT = 8889
+COMPOSE_FILE["services"]["proxy-multi-header"] = deepcopy(
+    COMPOSE_FILE["services"]["proxy"]
+)
+COMPOSE_FILE["services"]["proxy-multi-header"]["ports"] = [
+    f"{MULTI_HEADER_PROXY_PORT}:8888"
+]
+COMPOSE_FILE["services"]["proxy-multi-header"]["environment"].update(
+    {
+        "API_KEY_HEADER": "x-api-key,authorization",
+        "API_KEY_PREFIX": ",Bearer ",
+        "KNOWN_AUTH_HEADERS": "x-goog-api-key",
+    }
 )
 
 # Redis setup for testing
@@ -125,7 +143,7 @@ def docker_setup(request, compose_file):
         yield DEFAULT_LOCAL_API_KEY
 
     # Stop the Docker Compose file
-    subprocess.run(["docker", "compose", "down"])
+    subprocess.run(["docker", "compose", "down", "--remove-orphans"])
 
 
 @pytest.fixture

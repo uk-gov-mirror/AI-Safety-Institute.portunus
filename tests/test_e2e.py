@@ -9,7 +9,9 @@ import pytest
 import requests
 
 # Import from conftest
-from conftest import encode_base64, read_kinesis_records
+from conftest import MULTI_HEADER_PROXY_PORT, encode_base64, read_kinesis_records
+
+MULTI_HEADER_PROXY = f"http://localhost:{MULTI_HEADER_PROXY_PORT}"
 
 
 def test_custom_header_prefix_on_ping(docker_setup):
@@ -185,6 +187,89 @@ def test_credential_headers_are_not_logged(
         assert docker_setup not in value
         assert payload not in value
         assert "client-supplied" not in value
+
+
+def _upstream_headers(response: requests.Response) -> dict[str, str]:
+    return {k.lower(): v for k, v in response.json()["headers"].items()}
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    ("header", "prefix"),
+    [("X-Api-Key", ""), ("Authorization", "Bearer ")],
+    ids=["anthropic-sdk-1.x", "anthropic-sdk-2.x"],
+)
+def test_multi_header_proxy_accepts_payload_from_either_header(
+    header: str, prefix: str, docker_setup
+):
+    """Only the real key reaches upstream, in the first listed header."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    response = requests.get(
+        f"{MULTI_HEADER_PROXY}/get", headers={header: f"{prefix}{payload}"}
+    )
+
+    assert response.status_code == 200, response.content
+    upstream = _upstream_headers(response)
+    assert upstream["x-api-key"] == docker_setup
+    assert "authorization" not in upstream
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_multi_header_proxy_strips_both_headers_when_both_are_sent(docker_setup):
+    """A second payload never reaches upstream or the logs."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    other_payload = f"other-{uuid.uuid4()}"
+    marker = f"marker-{uuid.uuid4()}"
+    response = requests.get(
+        f"{MULTI_HEADER_PROXY}/get",
+        headers={
+            "x-api-key": payload,
+            "authorization": f"Bearer {other_payload}",
+            "x-test-marker": marker,
+        },
+    )
+
+    assert response.status_code == 200, response.content
+    upstream = _upstream_headers(response)
+    assert upstream["x-api-key"] == docker_setup
+    assert "authorization" not in upstream
+
+    record = _wait_for_request_headers_record(response.headers["X-Amzn-Trace-Id"])
+    logged = {
+        name.lower(): base64.b64decode(value).decode()
+        for name, value in record["raw_headers"].items()
+    }
+    assert logged["x-test-marker"] == marker
+    assert "x-api-key" not in logged
+    assert "authorization" not in logged
+    for value in logged.values():
+        assert docker_setup not in value
+        assert payload not in value
+        assert other_payload not in value
+
+
+@pytest.mark.parametrize(
+    "docker_setup",
+    ["xyz"],
+    indirect=True,
+)
+def test_multi_header_proxy_rejects_wrong_prefix(docker_setup):
+    """A listed header without its prefix is rejected."""
+    payload = encode_base64({"credentials": {}, "secret_arn": ""})
+    response = requests.get(
+        f"{MULTI_HEADER_PROXY}/get", headers={"authorization": f"Basic {payload}"}
+    )
+
+    assert response.status_code == 401, response.content
+    assert "Invalid authorization format" in response.json()["error"]["message"]
 
 
 # Manually test with:

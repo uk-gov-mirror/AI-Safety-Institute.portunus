@@ -74,7 +74,7 @@ function envoy_on_request(request_handle)
 	-- 3. Extracts authorization payload from headers
 	-- 4. Calls Portunus service to retrieve real API key
 	-- 5. Handles errors from Portunus service
-	-- 6. Sets the upstream auth header to the real credential and removes the header the payload arrived in
+	-- 6. Sets the upstream auth header to the real credential and removes every other accepted inbound header
 	-- 7. Logs request body, headers, and trailers
 
 	-- Handle /ping health check requests without authorization
