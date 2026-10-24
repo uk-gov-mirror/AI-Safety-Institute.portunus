@@ -13,6 +13,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `portunus encode-credentials --caller-role-arn` sets the role to assume
   instead of the caller's own. The default is rebuilt from the session ARN,
   which has no IAM path, so pass it for caller roles with a path.
+- `API_KEY_HEADER` and `API_KEY_PREFIX` accept comma-separated lists, one
+  prefix per header, so the payload can arrive in any listed header. Use
+  `x-api-key,authorization` with `,Bearer ` for `anthropic` SDK 1.x and 2.x.
+  Listed headers are removed before the request goes upstream and from logged
+  headers. Malformed lists (mismatched lengths, an empty name, a prefix with
+  leading whitespace) stop the proxy at start-up. (#217)
 
 ## [0.11.0] - 2026-10-02
 

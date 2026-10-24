@@ -17,7 +17,7 @@ It consists of two main components:
       - **JSON with target validation**: `{"secret":"sk-1234567890abcdef","host":"api.openai.com"}` (only works with matching proxy target)
       - **Minted token**: `{"type":"anthropic_wif", ...}`, `{"type":"openai_wif", ...}`, `{"type":"openrouter_wif", ...}` or `{"type":"gcp_wif", ...}` (no key is stored; Portunus mints a short-lived token per caller)
   - If successful, Portunus returns the real API key to the Envoy instance
-  - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or `API_KEY_HEADER` by default), removing the `API_KEY_HEADER` header when the two differ, before allowing the request to proceed. Every other header is forwarded untouched
+  - The filter swaps the original authorization payload for the real API key (in the header named by the `/authorise` response, or the first `API_KEY_HEADER` by default), removing every `API_KEY_HEADER` header other than that one, before allowing the request to proceed. Every other header is forwarded untouched
   - If any of the above fails, the connection is terminated and an appropriate response is sent to the client
   - As the above is happening, Envoy also sends request and response data to the Portunus `/log/..` endpoints for storage
 
@@ -154,7 +154,7 @@ Do not expose Portunus directly to clients or the public internet.
 Portunus captures **full request and response data** — bodies, headers, and trailers — and publishes it to Kinesis for the audit trail. This is deliberate: the logs are an audit record of everything that passed through the proxy. Be aware that this means:
 
 - **Request and response bodies are stored verbatim**, including prompts, completions, and any data (personal, commercial, or otherwise sensitive) that clients send or receive.
-- **Headers and URLs are stored verbatim**, except the headers that can carry a credential: the provider API key header (`API_KEY_HEADER`), the header the real upstream credential is injected into, and every name in `KNOWN_AUTH_HEADERS`. These are dropped before logging. No other headers are filtered — secrets carried in any *other* header, or embedded in a URL or body, **will be captured**.
+- **Headers and URLs are stored verbatim**, except the headers that can carry a credential: every provider API key header (`API_KEY_HEADER`), the header the real upstream credential is injected into, and every name in `KNOWN_AUTH_HEADERS`. These are dropped before logging. No other headers are filtered — secrets carried in any *other* header, or embedded in a URL or body, **will be captured**.
 
 For minted tokens, each mint writes one log line pairing the `jti` of the STS identity token (which providers record when they exchange it) with the federation role ARN and the caller's user, principal, session and project. A provider-side record is matched to the caller through that line, and to the caller's requests through the per-request logs for the token's lifetime; the tokens themselves are not logged.
 
@@ -169,8 +169,8 @@ Portunus does **not** attempt to redact secrets or sensitive content from what i
 | `AWS_REGION` | AWS region for all service clients | *(required)* |
 | `PORTUNUS_API_KEY` | Shared secret the proxy attaches to every Portunus service call, in the `PORTUNUS_API_KEY_HEADER` header. Portunus does not validate it — see [Security Model](#security-model) | - |
 | `PORTUNUS_API_KEY_HEADER` | Header carrying the shared secret | `x-api-key` |
-| `API_KEY_HEADER` | Header name for the API key | `authorization` |
-| `API_KEY_PREFIX` | Prefix for the API key value | `Bearer ` |
+| `API_KEY_HEADER` | Header name for the API key. A comma-separated list accepts the payload from any of them; the earliest present header whose prefix matches wins, and the first listed is where the real key goes by default (e.g. `x-api-key,authorization` for `anthropic` SDK 1.x and 2.x) | `authorization` |
+| `API_KEY_PREFIX` | Prefix for the API key value. With several headers, a comma-separated list with one prefix per header, kept verbatim; prefixes cannot contain commas or start with whitespace, and malformed lists stop the proxy at start-up (e.g. `,Bearer ` for the example above) | `Bearer ` |
 | `KNOWN_AUTH_HEADERS` | Comma-separated header names excluded from header logging, in addition to `API_KEY_HEADER` and the header the credential is written to. Does not affect which headers are forwarded | `authorization,x-api-key,x-goog-api-key,api-key` |
 | `PORTUNUS_HEADER_PREFIX` | Prefix for proxy response headers (`x-{prefix}-*`) | `portunus` |
 | `RATE_LIMIT_PERCENT_ENABLED` | Percentage of traffic to rate limit (0 = disabled) | `0` |
